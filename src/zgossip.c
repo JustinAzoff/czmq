@@ -187,6 +187,43 @@ server_terminate (server_t *self)
     zhashx_destroy (&self->tuples);
 }
 
+void
+server_setup_curve (server_t *self, const char *endpoint, zsock_t *remote)
+{
+    zconfig_t *connect_section = zconfig_locate (self->config, "zgossip/connect");
+    if (!connect_section)
+        return;
+
+    connect_section = zconfig_child (connect_section);
+    char *server_key = NULL;
+    while(connect_section) {
+        char *config_endpoint = zconfig_value(connect_section);
+        if(streq(endpoint, config_endpoint)) {
+            printf("Found matching endpoint for %s\n", endpoint);
+            zconfig_t *flags = zconfig_child (connect_section);
+            if(flags && streq(zconfig_name(flags), "public-key")) {
+                server_key = zconfig_value(flags);
+                break;
+            }
+        }
+        connect_section = zconfig_next (connect_section);
+    }
+    if(!server_key) {
+        printf("Could not find server cert for %s\n", endpoint);
+        return;
+    }
+    printf("Using key %s for %s\n", server_key, endpoint);
+    zsock_set_curve_serverkey (remote, server_key);
+
+    zconfig_t *pk_file = zconfig_locate(self->config, "zgossip/security/private_key");
+    if(!pk_file) {
+        printf("No zgossip/security/private_key in config\n");
+        return;
+    }
+    zcert_t *pk = zcert_load(zconfig_value(pk_file));
+    zcert_apply (pk, remote);
+}
+
 //  Connect to a remote server
 
 static void
@@ -199,6 +236,7 @@ server_connect (server_t *self, const char *endpoint)
     //  messages as needed in outgoing pipes. Note that the maximum number
     //  is the overall tuple set size.
     zsock_set_unbounded (remote);
+    server_setup_curve(self, endpoint, remote);
     if (zsock_connect (remote, "%s", endpoint)) {
         zsys_warning ("bad zgossip endpoint '%s'", endpoint);
         zsock_destroy (&remote);
@@ -297,6 +335,14 @@ server_method (server_t *self, const char *method, zmsg_t *msg)
         zsys_error ("unknown zgossip method '%s'", method);
 
     return reply;
+}
+
+static void
+server_configuration (server_t *self, zconfig_t *config)
+{
+  ZPROTO_UNUSED(self);
+  ZPROTO_UNUSED(config);
+  //  Apply new configuration
 }
 
 

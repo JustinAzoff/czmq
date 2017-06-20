@@ -29,6 +29,10 @@
 @end
 */
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
 #include "czmq_classes.h"
 #include "./zgossip_msg.h"
 
@@ -193,6 +197,47 @@ struct _zgossip_msg_t {
     self->needle += string_size; \
 }
 
+//  --------------------------------------------------------------------------
+//  bytes cstring conversion macros
+
+// create new array of unsigned char from properly encoded string
+// len of resulting array is strlen (str) / 2
+// caller is responsibe for freeing up the memory
+#define BYTES_FROM_STR(dst, _str) { \
+    char *str = (char*) (_str); \
+    if (!str || (strlen (str) % 2) != 0) \
+        return NULL; \
+\
+    size_t strlen_2 = strlen (str) / 2; \
+    byte *mem = (byte*) zmalloc (strlen_2); \
+\
+    for (size_t i = 0; i != strlen_2; i++) \
+    { \
+        char buff[3] = {0x0, 0x0, 0x0}; \
+        strncpy (buff, str, 2); \
+        unsigned int uint; \
+        sscanf (buff, "%x", &uint); \
+        assert (uint <= 0xff); \
+        mem [i] = (byte) (0xff & uint); \
+        str += 2; \
+    } \
+    dst = mem; \
+}
+
+// convert len bytes to hex string
+// caller is responsibe for freeing up the memory
+#define STR_FROM_BYTES(dst, _mem, _len) { \
+    byte *mem = (byte*) (_mem); \
+    size_t len = (size_t) (_len); \
+    char* ret = (char*) zmalloc (2*len + 1); \
+    char* aux = ret; \
+    for (size_t i = 0; i != len; i++) \
+    { \
+        sprintf (aux, "%02x", mem [i]); \
+        aux+=2; \
+    } \
+    dst = ret; \
+}
 
 //  --------------------------------------------------------------------------
 //  Create a new zgossip_msg
@@ -201,6 +246,115 @@ zgossip_msg_t *
 zgossip_msg_new (void)
 {
     zgossip_msg_t *self = (zgossip_msg_t *) zmalloc (sizeof (zgossip_msg_t));
+    return self;
+}
+
+//  --------------------------------------------------------------------------
+//  Create a new zgossip_msg from zpl/zconfig_t *
+
+zgossip_msg_t *
+    zgossip_msg_new_zpl (zconfig_t *config)
+{
+    assert (config);
+    zgossip_msg_t *self = NULL;
+    char *message = zconfig_get (config, "message", NULL);
+    if (!message) {
+        zsys_error ("Can't find 'message' section");
+        return NULL;
+    }
+
+    if (streq ("ZGOSSIP_MSG_HELLO", message)) {
+        self = zgossip_msg_new ();
+        zgossip_msg_set_id (self, ZGOSSIP_MSG_HELLO);
+    }
+    else
+    if (streq ("ZGOSSIP_MSG_PUBLISH", message)) {
+        self = zgossip_msg_new ();
+        zgossip_msg_set_id (self, ZGOSSIP_MSG_PUBLISH);
+    }
+    else
+    if (streq ("ZGOSSIP_MSG_PING", message)) {
+        self = zgossip_msg_new ();
+        zgossip_msg_set_id (self, ZGOSSIP_MSG_PING);
+    }
+    else
+    if (streq ("ZGOSSIP_MSG_PONG", message)) {
+        self = zgossip_msg_new ();
+        zgossip_msg_set_id (self, ZGOSSIP_MSG_PONG);
+    }
+    else
+    if (streq ("ZGOSSIP_MSG_INVALID", message)) {
+        self = zgossip_msg_new ();
+        zgossip_msg_set_id (self, ZGOSSIP_MSG_INVALID);
+    }
+    else
+       {
+        zsys_error ("message=%s is not known", message);
+        return NULL;
+       }
+
+    char *s = zconfig_get (config, "routing_id", NULL);
+    if (s) {
+        byte *bvalue;
+        BYTES_FROM_STR (bvalue, s);
+        if (!bvalue) {
+            zgossip_msg_destroy (&self);
+            return NULL;
+        }
+        zframe_t *frame = zframe_new (bvalue, strlen (s) / 2);
+        free (bvalue);
+        self->routing_id = frame;
+    }
+
+    zconfig_t *content = zconfig_locate (config, "content");
+    if (!content) {
+        zsys_error ("Can't find 'content' section");
+        return NULL;
+    }
+    switch (self->id) {
+        case ZGOSSIP_MSG_HELLO:
+            break;
+        case ZGOSSIP_MSG_PUBLISH:
+            {
+            char *s = zconfig_get (content, "key", NULL);
+            if (!s) {
+                zgossip_msg_destroy (&self);
+                return NULL;
+            }
+            strncpy (self->key, s, 256);
+            }
+            {
+            char *s = zconfig_get (content, "value", NULL);
+            if (!s) {
+                zgossip_msg_destroy (&self);
+                return NULL;
+            }
+            self->value = strdup (s);
+            }
+            {
+            char *es = NULL;
+            char *s = zconfig_get (content, "ttl", NULL);
+            if (!s) {
+                zsys_error ("content/ttl not found");
+                zgossip_msg_destroy (&self);
+                return NULL;
+            }
+            uint64_t uvalue = (uint64_t) strtoll (s, &es, 10);
+            if (es != s+strlen (s)) {
+                zsys_error ("content/ttl: %s is not a number", s);
+                zgossip_msg_destroy (&self);
+                return NULL;
+            }
+            self->ttl = uvalue;
+            }
+            break;
+        case ZGOSSIP_MSG_PING:
+            break;
+        case ZGOSSIP_MSG_PONG:
+            break;
+        case ZGOSSIP_MSG_INVALID:
+            break;
+    }
     return self;
 }
 
@@ -227,28 +381,59 @@ zgossip_msg_destroy (zgossip_msg_t **self_p)
 
 
 //  --------------------------------------------------------------------------
+//  Create a deep copy of a zgossip_msg instance
+
+zgossip_msg_t *
+zgossip_msg_dup (zgossip_msg_t *other)
+{
+    assert (other);
+    zgossip_msg_t *copy = zgossip_msg_new ();
+
+    // Copy the routing and message id
+    zgossip_msg_set_routing_id (copy, zframe_dup (zgossip_msg_routing_id (other)));
+    zgossip_msg_set_id (copy, zgossip_msg_id (other));
+
+    // Copy the rest of the fields
+    zgossip_msg_set_key (copy, zgossip_msg_key (other));
+    {
+        const char *str = zgossip_msg_value (other);
+        if (str) {
+            zgossip_msg_set_value (copy, strdup (str));
+        }
+    }
+    zgossip_msg_set_ttl (copy, zgossip_msg_ttl (other));
+
+    return copy;
+}
+
+//  --------------------------------------------------------------------------
 //  Receive a zgossip_msg from the socket. Returns 0 if OK, -1 if
-//  there was an error. Blocks if there is no message waiting.
+//  the recv was interrupted, or -2 if the message is malformed.
+//  Blocks if there is no message waiting.
 
 int
 zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
 {
     assert (input);
+    int rc = 0;
+    zmq_msg_t frame;
+    zmq_msg_init (&frame);
 
     if (zsock_type (input) == ZMQ_ROUTER) {
         zframe_destroy (&self->routing_id);
         self->routing_id = zframe_recv (input);
         if (!self->routing_id || !zsock_rcvmore (input)) {
             zsys_warning ("zgossip_msg: no routing ID");
-            return -1;          //  Interrupted or malformed
+            rc = -1;            //  Interrupted
+            goto malformed;
         }
     }
-    zmq_msg_t frame;
-    zmq_msg_init (&frame);
-    int size = zmq_msg_recv (&frame, zsock_resolve (input), 0);
+    int size;
+    size = zmq_msg_recv (&frame, zsock_resolve (input), 0);
     if (size == -1) {
         zsys_warning ("zgossip_msg: interrupted");
-        goto malformed;         //  Interrupted
+        rc = -1;                //  Interrupted
+        goto malformed;
     }
     //  Get and check protocol signature
     self->needle = (byte *) zmq_msg_data (&frame);
@@ -258,9 +443,8 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
     GET_NUMBER2 (signature);
     if (signature != (0xAAA0 | 0)) {
         zsys_warning ("zgossip_msg: invalid signature");
-        //  TODO: discard invalid messages and loop, and return
-        //  -1 only on interrupt
-        goto malformed;         //  Interrupted
+        rc = -2;                //  Malformed
+        goto malformed;
     }
     //  Get message id and parse per message type
     GET_NUMBER1 (self->id);
@@ -272,6 +456,7 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
                 GET_NUMBER1 (version);
                 if (version != 1) {
                     zsys_warning ("zgossip_msg: version is invalid");
+                    rc = -2;    //  Malformed
                     goto malformed;
                 }
             }
@@ -283,6 +468,7 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
                 GET_NUMBER1 (version);
                 if (version != 1) {
                     zsys_warning ("zgossip_msg: version is invalid");
+                    rc = -2;    //  Malformed
                     goto malformed;
                 }
             }
@@ -297,6 +483,7 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
                 GET_NUMBER1 (version);
                 if (version != 1) {
                     zsys_warning ("zgossip_msg: version is invalid");
+                    rc = -2;    //  Malformed
                     goto malformed;
                 }
             }
@@ -308,6 +495,7 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
                 GET_NUMBER1 (version);
                 if (version != 1) {
                     zsys_warning ("zgossip_msg: version is invalid");
+                    rc = -2;    //  Malformed
                     goto malformed;
                 }
             }
@@ -319,6 +507,7 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
                 GET_NUMBER1 (version);
                 if (version != 1) {
                     zsys_warning ("zgossip_msg: version is invalid");
+                    rc = -2;    //  Malformed
                     goto malformed;
                 }
             }
@@ -326,17 +515,17 @@ zgossip_msg_recv (zgossip_msg_t *self, zsock_t *input)
 
         default:
             zsys_warning ("zgossip_msg: bad message ID");
+            rc = -2;            //  Malformed
             goto malformed;
     }
     //  Successful return
     zmq_msg_close (&frame);
-    return 0;
+    return rc;
 
     //  Error returns
     malformed:
-        zsys_warning ("zgossip_msg: zgossip_msg malformed message, fail");
         zmq_msg_close (&frame);
-        return -1;              //  Invalid message
+        return rc;              //  Invalid message
 }
 
 
@@ -462,6 +651,100 @@ zgossip_msg_print (zgossip_msg_t *self)
     }
 }
 
+//  --------------------------------------------------------------------------
+//  Export class as zconfig_t*. Caller is responsibe for destroying the instance
+
+zconfig_t *
+zgossip_msg_zpl (zgossip_msg_t *self, zconfig_t *parent)
+{
+    assert (self);
+
+    zconfig_t *root = zconfig_new ("zgossip_msg", parent);
+
+    switch (self->id) {
+        case ZGOSSIP_MSG_HELLO:
+        {
+            zconfig_put (root, "message", "ZGOSSIP_MSG_HELLO");
+
+            if (self->routing_id) {
+                char *hex = NULL;
+                STR_FROM_BYTES (hex, zframe_data (self->routing_id), zframe_size (self->routing_id));
+                zconfig_putf (root, "routing_id", "%s", hex);
+                zstr_free (&hex);
+            }
+
+            zconfig_t *config = zconfig_new ("content", root);
+            zconfig_putf (config, "version", "%s", "1");
+            break;
+            }
+        case ZGOSSIP_MSG_PUBLISH:
+        {
+            zconfig_put (root, "message", "ZGOSSIP_MSG_PUBLISH");
+
+            if (self->routing_id) {
+                char *hex = NULL;
+                STR_FROM_BYTES (hex, zframe_data (self->routing_id), zframe_size (self->routing_id));
+                zconfig_putf (root, "routing_id", "%s", hex);
+                zstr_free (&hex);
+            }
+
+            zconfig_t *config = zconfig_new ("content", root);
+            zconfig_putf (config, "version", "%s", "1");
+            //if (self->key)
+                zconfig_putf (config, "key", "%s", self->key);
+            if (self->value)
+                zconfig_putf (config, "value", "%s", self->value);
+            zconfig_putf (config, "ttl", "%ld", (long) self->ttl);
+            break;
+            }
+        case ZGOSSIP_MSG_PING:
+        {
+            zconfig_put (root, "message", "ZGOSSIP_MSG_PING");
+
+            if (self->routing_id) {
+                char *hex = NULL;
+                STR_FROM_BYTES (hex, zframe_data (self->routing_id), zframe_size (self->routing_id));
+                zconfig_putf (root, "routing_id", "%s", hex);
+                zstr_free (&hex);
+            }
+
+            zconfig_t *config = zconfig_new ("content", root);
+            zconfig_putf (config, "version", "%s", "1");
+            break;
+            }
+        case ZGOSSIP_MSG_PONG:
+        {
+            zconfig_put (root, "message", "ZGOSSIP_MSG_PONG");
+
+            if (self->routing_id) {
+                char *hex = NULL;
+                STR_FROM_BYTES (hex, zframe_data (self->routing_id), zframe_size (self->routing_id));
+                zconfig_putf (root, "routing_id", "%s", hex);
+                zstr_free (&hex);
+            }
+
+            zconfig_t *config = zconfig_new ("content", root);
+            zconfig_putf (config, "version", "%s", "1");
+            break;
+            }
+        case ZGOSSIP_MSG_INVALID:
+        {
+            zconfig_put (root, "message", "ZGOSSIP_MSG_INVALID");
+
+            if (self->routing_id) {
+                char *hex = NULL;
+                STR_FROM_BYTES (hex, zframe_data (self->routing_id), zframe_size (self->routing_id));
+                zconfig_putf (root, "routing_id", "%s", hex);
+                zstr_free (&hex);
+            }
+
+            zconfig_t *config = zconfig_new ("content", root);
+            zconfig_putf (config, "version", "%s", "1");
+            break;
+            }
+    }
+    return root;
+}
 
 //  --------------------------------------------------------------------------
 //  Get/set the message routing_id
@@ -592,13 +875,14 @@ zgossip_msg_set_ttl (zgossip_msg_t *self, uint32_t ttl)
 void
 zgossip_msg_test (bool verbose)
 {
-    printf (" * zgossip_msg:");
+    printf (" * zgossip_msg: ");
 
     if (verbose)
         printf ("\n");
 
     //  @selftest
     //  Simple create/destroy test
+    zconfig_t *config;
     zgossip_msg_t *self = zgossip_msg_new ();
     assert (self);
     zgossip_msg_destroy (&self);
@@ -620,68 +904,139 @@ zgossip_msg_test (bool verbose)
     self = zgossip_msg_new ();
     zgossip_msg_set_id (self, ZGOSSIP_MSG_HELLO);
 
+    // convert to zpl
+    config = zgossip_msg_zpl (self, NULL);
+    if (verbose)
+        zconfig_print (config);
     //  Send twice
     zgossip_msg_send (self, output);
     zgossip_msg_send (self, output);
 
-    for (instance = 0; instance < 2; instance++) {
-        zgossip_msg_recv (self, input);
-        assert (zgossip_msg_routing_id (self));
+    for (instance = 0; instance < 3; instance++) {
+        zgossip_msg_t *self_temp = self;
+        if (instance < 2)
+            zgossip_msg_recv (self, input);
+        else {
+            self = zgossip_msg_new_zpl (config);
+            zconfig_destroy (&config);
+        }
+        if (instance < 2)
+            assert (zgossip_msg_routing_id (self));
+        if (instance == 2) {
+            zgossip_msg_destroy (&self);
+            self = self_temp;
+        }
     }
     zgossip_msg_set_id (self, ZGOSSIP_MSG_PUBLISH);
 
     zgossip_msg_set_key (self, "Life is short but Now lasts for ever");
     zgossip_msg_set_value (self, "Life is short but Now lasts for ever");
     zgossip_msg_set_ttl (self, 123);
+    // convert to zpl
+    config = zgossip_msg_zpl (self, NULL);
+    if (verbose)
+        zconfig_print (config);
     //  Send twice
     zgossip_msg_send (self, output);
     zgossip_msg_send (self, output);
 
-    for (instance = 0; instance < 2; instance++) {
-        zgossip_msg_recv (self, input);
-        assert (zgossip_msg_routing_id (self));
+    for (instance = 0; instance < 3; instance++) {
+        zgossip_msg_t *self_temp = self;
+        if (instance < 2)
+            zgossip_msg_recv (self, input);
+        else {
+            self = zgossip_msg_new_zpl (config);
+            zconfig_destroy (&config);
+        }
+        if (instance < 2)
+            assert (zgossip_msg_routing_id (self));
         assert (streq (zgossip_msg_key (self), "Life is short but Now lasts for ever"));
         assert (streq (zgossip_msg_value (self), "Life is short but Now lasts for ever"));
         assert (zgossip_msg_ttl (self) == 123);
+        if (instance == 2) {
+            zgossip_msg_destroy (&self);
+            self = self_temp;
+        }
     }
     zgossip_msg_set_id (self, ZGOSSIP_MSG_PING);
 
+    // convert to zpl
+    config = zgossip_msg_zpl (self, NULL);
+    if (verbose)
+        zconfig_print (config);
     //  Send twice
     zgossip_msg_send (self, output);
     zgossip_msg_send (self, output);
 
-    for (instance = 0; instance < 2; instance++) {
-        zgossip_msg_recv (self, input);
-        assert (zgossip_msg_routing_id (self));
+    for (instance = 0; instance < 3; instance++) {
+        zgossip_msg_t *self_temp = self;
+        if (instance < 2)
+            zgossip_msg_recv (self, input);
+        else {
+            self = zgossip_msg_new_zpl (config);
+            zconfig_destroy (&config);
+        }
+        if (instance < 2)
+            assert (zgossip_msg_routing_id (self));
+        if (instance == 2) {
+            zgossip_msg_destroy (&self);
+            self = self_temp;
+        }
     }
     zgossip_msg_set_id (self, ZGOSSIP_MSG_PONG);
 
+    // convert to zpl
+    config = zgossip_msg_zpl (self, NULL);
+    if (verbose)
+        zconfig_print (config);
     //  Send twice
     zgossip_msg_send (self, output);
     zgossip_msg_send (self, output);
 
-    for (instance = 0; instance < 2; instance++) {
-        zgossip_msg_recv (self, input);
-        assert (zgossip_msg_routing_id (self));
+    for (instance = 0; instance < 3; instance++) {
+        zgossip_msg_t *self_temp = self;
+        if (instance < 2)
+            zgossip_msg_recv (self, input);
+        else {
+            self = zgossip_msg_new_zpl (config);
+            zconfig_destroy (&config);
+        }
+        if (instance < 2)
+            assert (zgossip_msg_routing_id (self));
+        if (instance == 2) {
+            zgossip_msg_destroy (&self);
+            self = self_temp;
+        }
     }
     zgossip_msg_set_id (self, ZGOSSIP_MSG_INVALID);
 
+    // convert to zpl
+    config = zgossip_msg_zpl (self, NULL);
+    if (verbose)
+        zconfig_print (config);
     //  Send twice
     zgossip_msg_send (self, output);
     zgossip_msg_send (self, output);
 
-    for (instance = 0; instance < 2; instance++) {
-        zgossip_msg_recv (self, input);
-        assert (zgossip_msg_routing_id (self));
+    for (instance = 0; instance < 3; instance++) {
+        zgossip_msg_t *self_temp = self;
+        if (instance < 2)
+            zgossip_msg_recv (self, input);
+        else {
+            self = zgossip_msg_new_zpl (config);
+            zconfig_destroy (&config);
+        }
+        if (instance < 2)
+            assert (zgossip_msg_routing_id (self));
+        if (instance == 2) {
+            zgossip_msg_destroy (&self);
+            self = self_temp;
+        }
     }
 
     zgossip_msg_destroy (&self);
     zsock_destroy (&input);
     zsock_destroy (&output);
-
-#if defined (__WINDOWS__)
-    zsys_shutdown();
-#endif
     //  @end
 
     printf ("OK\n");
