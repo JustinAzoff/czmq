@@ -215,9 +215,9 @@ server_setup_curve (server_t *self, const char *endpoint, zsock_t *remote)
     printf("Using key %s for %s\n", server_key, endpoint);
     zsock_set_curve_serverkey (remote, server_key);
 
-    zconfig_t *pk_file = zconfig_locate(self->config, "zgossip/security/private_key");
+    zconfig_t *pk_file = zconfig_locate(self->config, "zgossip/security/private-key");
     if(!pk_file) {
-        printf("No zgossip/security/private_key in config\n");
+        printf("No zgossip/security/private-key in config\n");
         return;
     }
     zcert_t *pk = zcert_load(zconfig_value(pk_file));
